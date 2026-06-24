@@ -1,0 +1,26 @@
+# Environment / secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
+
+# Vector store / data
+data/
+*.chroma/
+chroma_db/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Test / build artifacts
+.pytest_cache/
+.mypy_cache/
+build/
+dist/

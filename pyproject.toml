@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "research-assistant"
+version = "0.1.0"
+description = "AI-powered research assistant over scholarly papers (RAG + live search + synthesis)"
+requires-python = ">=3.11"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.scripts]
+research = "research_assistant.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

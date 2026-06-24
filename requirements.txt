@@ -1,0 +1,31 @@
+# --- Core ---
+python-dotenv>=1.0.0
+
+# --- Reasoning / synthesis LLM (Claude) ---
+anthropic>=0.40.0
+
+# --- RAG framework (Phase 2+) ---
+llama-index-core>=0.12.0
+llama-index-vector-stores-chroma>=0.4.0
+llama-index-embeddings-huggingface>=0.4.0
+chromadb>=0.5.0
+
+# --- Local embedding backend (runs Qwen3-Embedding on your machine) ---
+# CPU-only torch wheel keeps the install small (~200MB instead of ~2.5GB)
+# and needs no GPU. Remove the --extra-index-url line if you have a CUDA
+# GPU and want torch to use it.
+--extra-index-url https://download.pytorch.org/whl/cpu
+sentence-transformers>=3.0.0
+torch>=2.2.0
+pypdf>=4.0.0
+
+# --- Live paper sources (Phase 1) ---
+arxiv>=2.1.0
+requests>=2.31.0
+
+# --- Phase 6: thin API layer ---
+fastapi>=0.115.0
+uvicorn>=0.30.0
+
+# --- Tests ---
+pytest>=8.0.0
