@@ -23,44 +23,100 @@ Full reference for every service, CLI command, and configuration option in the r
 
 ## 1. Architecture overview
 
-Every user-facing operation runs through the same five-stage RAG pipeline:
+### Models and infrastructure
 
 ```
-1. INGEST    Grab paper text (title + abstract, or full PDF)
-2. EMBED     Turn text into vectors that capture meaning        → Qwen3-Embedding-0.6B (local)
-3. STORE     Save vectors in a searchable vector DB             → Chroma (local, persistent)
-4. RETRIEVE  Embed the question, find the best matching chunks  → BM25 + vector → RRF → reranker
-5. GENERATE  Hand chunks + the question to an LLM              → Claude Haiku 4.5 (API)
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                        LOCAL MODELS  (CPU, HF cache)                        ║
+║                                                                              ║
+║  ┌─────────────────────────────┐  ┌──────────────────────────────────────┐  ║
+║  │  Qwen3-Embedding-0.6B       │  │  Qwen2.5-0.5B-Instruct               │  ║
+║  │  • domain classification    │  │  • query rewriting                   │  ║
+║  │  • paper ingestion (embed)  │  │  natural question → keyword phrases  │  ║
+║  │  • Q&A retrieval (embed)    │  └──────────────────────────────────────┘  ║
+║  └─────────────────────────────┘  ┌──────────────────────────────────────┐  ║
+║                                   │  ms-marco-MiniLM-L-6-v2 (cross-enc.) │  ║
+║                                   │  • reranks top-20 chunks → top-6     │  ║
+║                                   └──────────────────────────────────────┘  ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                        CLOUD  (Anthropic API)                                ║
+║   Claude Haiku 4.5  •  Q&A generation  •  MAP summaries  •  REDUCE review   ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                     LIVE SOURCES  (free, no key needed)                      ║
+║         arXiv               Semantic Scholar            OpenAlex             ║
+║      (STEM only)           (multidisciplinary)        (multidisciplinary)    ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                        LOCAL STORE                                           ║
+║         Chroma  (persistent vector DB, data/chroma/)                         ║
+║         chunks: title+abstract or full PDF, embedded by Qwen3-Embedding      ║
+╚══════════════════════════════════════════════════════════════════════════════╝
 ```
 
-Stages 1–4 are entirely local and free. Stage 5 calls the Anthropic API and costs roughly $0.001–$0.01 per query at Haiku 4.5 pricing.
+Everything except Claude is **free and local**. Claude costs roughly $0.001–$0.01 per Q&A or review at Haiku 4.5 pricing.
 
-### Phase 4 — hybrid retrieval pipeline
-
-Pure vector search misses exact-term queries ("BERT", "GPT-4"). BM25 misses semantic queries ("making models smaller" ≠ "parameter-efficient fine-tuning"). Combining both and reranking covers both failure modes:
+### Command pipelines
 
 ```
-Question
-  → BM25Retriever        (top-20 by keyword overlap)  ─┐
-  → VectorIndexRetriever (top-20 by embedding cosine) ─┤  Reciprocal Rank Fusion
-                                                        ↓
-                              Cross-encoder reranker (keeps top-6)
-                                                        ↓
-                                               Claude Haiku 4.5
+research search "topic"
+  │
+  ├─1─► Qwen3-Embedding → cosine vs domain descriptions → domain label
+  │      e.g. "psychology" → exclude arXiv
+  │
+  ├─2─► Qwen2.5-0.5B → 2-3 keyword query variants
+  │      ("adolescent attention span" | "teenage focus digital media" | ...)
+  │
+  └─3─► search_all × each query (domain-filtered)
+         deduplicate by paper_id → numbered results
+
+
+research save 2  (or  research save arxiv:xxxx)
+  │
+  └─1─► title + abstract  [+ full PDF text if --full-text]
+         chunk (512 tok, 64 overlap) → Qwen3-Embedding → Chroma
+
+
+research ask "question"
+  │
+  ├─1─► BM25Retriever  (keyword overlap)  ─┐
+  │                                        ├─ Reciprocal Rank Fusion → top-20
+  ├─2─► VectorRetriever (cosine sim.)    ──┘
+  │
+  ├─3─► ms-marco-MiniLM cross-encoder → rerank → top-6 chunks
+  │
+  └─4─► Claude Haiku 4.5 → cited answer
+
+
+research review "topic"
+  │
+  ├─1─► Qwen3-Embedding → domain → source list
+  │
+  ├─2─► Qwen2.5-0.5B → 2-3 keyword queries
+  │
+  ├─3─► search_all × each query (domain-filtered) ─┐
+  │                                                 ├─ deduplicate → paper list
+  ├─4─► Chroma saved library ──────────────────────┘
+  │
+  ├─5─► Claude Haiku [MAP] → batches of 8 → per-paper summaries
+  │
+  └─6─► Claude Haiku [REDUCE] → structured review
+         ## Main Themes / ## Consensus / ## Disagreements / ## Gaps
 ```
 
-**Why two stages?** The embedding model (bi-encoder) encodes query and document separately — fast but approximate. The cross-encoder sees query and document *together* and scores relevance much more precisely, but is too slow to run over thousands of chunks. Running it only on the top-20 fused candidates gets the best of both.
+### Why hybrid retrieval?
 
-### Phase 5 — map-reduce synthesis
+Pure vector search misses exact-term queries ("BERT", "GPT-4"). BM25 misses semantic queries ("making models smaller" ≠ "parameter-efficient fine-tuning"). Combining both covers each other's failure modes.
 
-Dumping 20+ abstracts into one prompt produces unfocused synthesis. Instead:
+**Why two reranking stages?** The embedding model (bi-encoder) encodes query and document separately — fast but approximate. The cross-encoder sees them *together* and scores much more precisely, but is too slow to run over thousands of chunks. Wide retrieval then precise reranking gets the best of both.
 
-```
-REWRITE Topic → 2-3 keyword queries via local Qwen2.5-0.5B-Instruct
-GATHER  Live APIs (per rewritten query) + library → deduplicated paper list
-MAP     Claude summarises each paper's relevance to the topic (8 per batch, one API call per batch)
-REDUCE  Claude synthesises all summaries → structured review with per-claim citations
-```
+### Why map-reduce for review?
+
+Dumping 20+ full abstracts into one prompt produces unfocused synthesis. Summarising each paper's relevance first (MAP) gives the REDUCE step tighter, more citable material — and keeps token usage bounded as the corpus grows.
 
 ---
 
