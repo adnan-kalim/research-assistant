@@ -50,6 +50,17 @@ class Settings:
         # set S2_API_KEY in .env if you have one and hit limits.
         self.semantic_scholar_api_key: str | None = os.getenv("S2_API_KEY")
 
+        # --- Phase 4: retrieval quality (hybrid search + reranking) ---
+        # Cross-encoder model used to rerank retrieved chunks. Any HuggingFace
+        # cross-encoder compatible with sentence-transformers works here.
+        self.reranker_model: str = os.getenv(
+            "RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2"
+        )
+        # How many chunks to keep after reranking (passed to Claude).
+        self.reranker_top_n: int = int(os.getenv("RERANKER_TOP_N", "6"))
+        # Wide retrieval pool before reranking; larger = better recall, slower rerank.
+        self.retrieval_wide_k: int = int(os.getenv("RETRIEVAL_WIDE_K", "20"))
+
         # --- Optional contact email for OpenAlex's "polite pool" ---
         # Setting this gets faster, less-throttled responses. Optional.
         self.contact_email: str | None = os.getenv("CONTACT_EMAIL")
@@ -67,6 +78,9 @@ class Settings:
             "anthropic_api_key": _mask(self.anthropic_api_key),
             "reasoning_model": self.reasoning_model,
             "embedding_model": self.embedding_model,
+            "reranker_model": self.reranker_model,
+            "reranker_top_n": str(self.reranker_top_n),
+            "retrieval_wide_k": str(self.retrieval_wide_k),
             "semantic_scholar_api_key": _mask(self.semantic_scholar_api_key),
             "contact_email": self.contact_email or "<not set>",
             "data_dir": str(self.data_dir),

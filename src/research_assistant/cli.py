@@ -20,11 +20,18 @@ from research_assistant import session
 from research_assistant.library import ingest, store
 from research_assistant.qa import engine as qa_engine
 from research_assistant.sources.aggregator import search_all
+from research_assistant.sources.domains import DOMAIN_SOURCES, resolve_sources
+from research_assistant.synthesis import review as synthesis_review
+
+# Valid --domain choices: all preset keys plus "auto".
+_DOMAIN_CHOICES = list(DOMAIN_SOURCES) + ["auto"]
 
 
 def _cmd_search(args: argparse.Namespace) -> int:
-    sources = args.sources.split(",") if args.sources else None
-    papers, warnings = search_all(args.query, limit=args.limit, source_names=sources)
+    source_names, explanation = resolve_sources(args.domain, args.sources, args.query)
+    print(f"[{explanation}]")
+
+    papers, warnings = search_all(args.query, limit=args.limit, source_names=source_names)
 
     for warning in warnings:
         print(f"warning: {warning}", file=sys.stderr)
@@ -83,13 +90,50 @@ def _cmd_library(args: argparse.Namespace) -> int:
 
 
 def _cmd_ask(args: argparse.Namespace) -> int:
-    answer = qa_engine.ask(args.question, top_k=args.top_k)
+    answer = qa_engine.ask(
+        args.question,
+        top_k=args.top_k,
+        use_hybrid=not args.no_hybrid,
+        use_reranker=not args.no_reranker,
+    )
     print(answer.text)
     if answer.citations:
         print("\nSources:")
         for citation in answer.citations:
             year = f" ({citation.year})" if citation.year else ""
             print(f"  - {citation.title}{year} -- {citation.authors}")
+    return 0
+
+
+def _cmd_review(args: argparse.Namespace) -> int:
+    if args.no_live:
+        print(f'Gathering papers on "{args.topic}" [library only, no live search]...')
+        lit = synthesis_review.review(
+            args.topic,
+            live_limit=args.live_limit,
+            include_live=False,
+            source_names=None,
+        )
+    else:
+        source_names, explanation = resolve_sources(args.domain, args.sources, args.topic)
+        print(f'Gathering papers on "{args.topic}" [{explanation}]...')
+        lit = synthesis_review.review(
+            args.topic,
+            live_limit=args.live_limit,
+            include_live=True,
+            source_names=source_names,
+        )
+
+    if not lit.sources:
+        print(lit.text)
+        return 1
+
+    print(f"Synthesising across {lit.paper_count} paper(s)...\n")
+    print(f"=== Literature Review: {args.topic!r} ===\n")
+    print(lit.text)
+    print(f"\n=== Sources ({lit.paper_count} papers) ===")
+    for i, src in enumerate(lit.sources, 1):
+        print(f"  {i}. [{src.source}] {src.title} — {src.label}")
     return 0
 
 
@@ -108,10 +152,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--limit", type=int, default=5, help="Max results per source (default: 5)"
     )
     search_parser.add_argument(
+        "--domain",
+        choices=_DOMAIN_CHOICES,
+        default="auto",
+        help=(
+            "Topic domain for source routing (default: auto). "
+            "'auto' classifies the query locally with the embedding model. "
+            "'all' queries every source. "
+            f"Presets: {', '.join(k for k in DOMAIN_SOURCES if k != 'all')}"
+        ),
+    )
+    search_parser.add_argument(
         "--sources",
         default=None,
-        help="Comma-separated sources to search (default: all). "
-        "Choices: arxiv, semantic_scholar, openalex",
+        help=(
+            "Comma-separated sources to search, overrides --domain. "
+            "Choices: arxiv, semantic_scholar, openalex"
+        ),
     )
     search_parser.set_defaults(func=_cmd_search)
 
@@ -139,9 +196,55 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ask_parser.add_argument("question", help="Your question")
     ask_parser.add_argument(
-        "--top-k", type=int, default=6, help="Number of chunks to retrieve (default: 6)"
+        "--top-k", type=int, default=6, help="Final chunks forwarded to Claude (default: 6)"
+    )
+    ask_parser.add_argument(
+        "--no-hybrid",
+        action="store_true",
+        help="Use vector-only retrieval instead of BM25 + vector fusion (A/B comparison)",
+    )
+    ask_parser.add_argument(
+        "--no-reranker",
+        action="store_true",
+        help="Skip cross-encoder reranking, use raw retrieval scores (A/B comparison)",
     )
     ask_parser.set_defaults(func=_cmd_ask)
+
+    review_parser = subparsers.add_parser(
+        "review", help="Synthesise a literature review across live search + saved library"
+    )
+    review_parser.add_argument("topic", help="Research topic to review")
+    review_parser.add_argument(
+        "--live-limit",
+        type=int,
+        default=10,
+        help="Papers to fetch per live source (arXiv, S2, OpenAlex). Default: 10",
+    )
+    review_parser.add_argument(
+        "--no-live",
+        action="store_true",
+        help="Skip live API search; synthesise only from your saved library",
+    )
+    review_parser.add_argument(
+        "--domain",
+        choices=_DOMAIN_CHOICES,
+        default="auto",
+        help=(
+            "Topic domain for source routing (default: auto). "
+            "'auto' classifies the topic locally with the embedding model. "
+            "'all' queries every source. "
+            f"Presets: {', '.join(k for k in DOMAIN_SOURCES if k != 'all')}"
+        ),
+    )
+    review_parser.add_argument(
+        "--sources",
+        default=None,
+        help=(
+            "Comma-separated sources to query, overrides --domain. "
+            "Choices: arxiv, semantic_scholar, openalex"
+        ),
+    )
+    review_parser.set_defaults(func=_cmd_review)
 
     return parser
 

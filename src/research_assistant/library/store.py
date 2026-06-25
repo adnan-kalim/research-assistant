@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import chromadb
 from llama_index.core import VectorStoreIndex
+from llama_index.core.schema import TextNode
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.vector_stores.chroma import ChromaVectorStore
 
@@ -63,6 +64,39 @@ def list_saved_papers() -> list[dict]:
         if paper_id and paper_id not in seen:
             seen[paper_id] = meta
     return list(seen.values())
+
+
+def get_all_text_nodes() -> list[TextNode]:
+    """Fetch every stored chunk as a TextNode, used to build the BM25 index.
+
+    Chroma stores embeddings but the BM25 retriever needs the raw text. We
+    pull documents + metadata from the collection and reconstruct TextNode
+    objects so LlamaIndex's BM25Retriever can tokenise and index them.
+    """
+    result = _get_collection().get(include=["documents", "metadatas"])
+    nodes: list[TextNode] = []
+    for doc, meta, node_id in zip(
+        result.get("documents") or [],
+        result.get("metadatas") or [],
+        result.get("ids") or [],
+    ):
+        if doc:
+            nodes.append(TextNode(text=doc, metadata=meta or {}, id_=node_id))
+    return nodes
+
+
+def get_paper_texts() -> dict[str, str]:
+    """Return {paper_id: full_text} by joining all stored chunks per paper.
+
+    Used by the synthesis engine to get each saved paper's content for MAP
+    summarization. Reuses get_all_text_nodes() so Chroma is only queried once.
+    """
+    by_paper: dict[str, list[str]] = {}
+    for node in get_all_text_nodes():
+        pid = node.metadata.get("paper_id")
+        if pid:
+            by_paper.setdefault(pid, []).append(node.text)
+    return {pid: "\n\n".join(chunks) for pid, chunks in by_paper.items()}
 
 
 def delete_paper(paper_id: str) -> None:

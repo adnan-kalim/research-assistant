@@ -27,5 +27,10 @@ requests>=2.31.0
 fastapi>=0.115.0
 uvicorn>=0.30.0
 
+# --- Phase 4: hybrid retrieval + reranking ---
+llama-index-retrievers-bm25>=0.3.0
+rank_bm25>=0.2.2
+llama-index-postprocessor-sbert-reranker>=0.3.0
+
 # --- Tests ---
 pytest>=8.0.0
