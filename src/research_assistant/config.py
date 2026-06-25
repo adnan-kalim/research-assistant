@@ -50,6 +50,13 @@ class Settings:
         # set S2_API_KEY in .env if you have one and hit limits.
         self.semantic_scholar_api_key: str | None = os.getenv("S2_API_KEY")
 
+        # --- Phase 5.5: query rewriting (local generative model) ---
+        # A small instruction-tuned model that converts natural-language questions
+        # into 2-3 tight keyword phrases before hitting live paper APIs.
+        self.query_rewriter_model: str = os.getenv(
+            "QUERY_REWRITER_MODEL", "Qwen/Qwen2.5-0.5B-Instruct"
+        )
+
         # --- Phase 4: retrieval quality (hybrid search + reranking) ---
         # Cross-encoder model used to rerank retrieved chunks. Any HuggingFace
         # cross-encoder compatible with sentence-transformers works here.
@@ -78,6 +85,7 @@ class Settings:
             "anthropic_api_key": _mask(self.anthropic_api_key),
             "reasoning_model": self.reasoning_model,
             "embedding_model": self.embedding_model,
+            "query_rewriter_model": self.query_rewriter_model,
             "reranker_model": self.reranker_model,
             "reranker_top_n": str(self.reranker_top_n),
             "retrieval_wide_k": str(self.retrieval_wide_k),

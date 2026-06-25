@@ -21,6 +21,7 @@ from research_assistant.library import ingest, store
 from research_assistant.qa import engine as qa_engine
 from research_assistant.sources.aggregator import search_all
 from research_assistant.sources.domains import DOMAIN_SOURCES, resolve_sources
+from research_assistant.sources.query_rewriter import rewrite as _rewrite
 from research_assistant.synthesis import review as synthesis_review
 
 # Valid --domain choices: all preset keys plus "auto".
@@ -31,11 +32,26 @@ def _cmd_search(args: argparse.Namespace) -> int:
     source_names, explanation = resolve_sources(args.domain, args.sources, args.query)
     print(f"[{explanation}]")
 
-    papers, warnings = search_all(args.query, limit=args.limit, source_names=source_names)
+    if args.no_rewrite:
+        queries = [args.query]
+    else:
+        queries = _rewrite(args.query)
+        if queries != [args.query]:
+            print(f"[rewritten queries: {' | '.join(repr(q) for q in queries)}]")
 
-    for warning in warnings:
+    seen: dict[str, object] = {}
+    all_warnings: list[str] = []
+    for q in queries:
+        batch, warnings = search_all(q, limit=args.limit, source_names=source_names)
+        all_warnings.extend(warnings)
+        for p in batch:
+            if p.id not in seen:
+                seen[p.id] = p
+
+    for warning in all_warnings:
         print(f"warning: {warning}", file=sys.stderr)
 
+    papers = list(seen.values())
     if not papers:
         print("No results.")
         return 1
@@ -106,6 +122,7 @@ def _cmd_ask(args: argparse.Namespace) -> int:
 
 
 def _cmd_review(args: argparse.Namespace) -> int:
+    use_rewriter = not args.no_rewrite
     if args.no_live:
         print(f'Gathering papers on "{args.topic}" [library only, no live search]...')
         lit = synthesis_review.review(
@@ -113,15 +130,23 @@ def _cmd_review(args: argparse.Namespace) -> int:
             live_limit=args.live_limit,
             include_live=False,
             source_names=None,
+            use_rewriter=False,
         )
     else:
         source_names, explanation = resolve_sources(args.domain, args.sources, args.topic)
         print(f'Gathering papers on "{args.topic}" [{explanation}]...')
+        if use_rewriter:
+            queries = _rewrite(args.topic)
+            print(f'[rewritten queries: {" | ".join(repr(q) for q in queries)}]')
+        else:
+            queries = None
         lit = synthesis_review.review(
             args.topic,
             live_limit=args.live_limit,
             include_live=True,
             source_names=source_names,
+            use_rewriter=False,   # already handled above
+            queries=queries,
         )
 
     if not lit.sources:
@@ -168,6 +193,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Comma-separated sources to search, overrides --domain. "
             "Choices: arxiv, semantic_scholar, openalex"
+        ),
+    )
+    search_parser.add_argument(
+        "--no-rewrite",
+        action="store_true",
+        help=(
+            "Skip local query rewriting; send your exact query to the APIs. "
+            "Useful when you've already crafted tight keyword phrases."
         ),
     )
     search_parser.set_defaults(func=_cmd_search)
@@ -242,6 +275,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Comma-separated sources to query, overrides --domain. "
             "Choices: arxiv, semantic_scholar, openalex"
+        ),
+    )
+    review_parser.add_argument(
+        "--no-rewrite",
+        action="store_true",
+        help=(
+            "Skip local query rewriting; send the topic verbatim to the APIs. "
+            "Useful when the topic is already phrased as tight keyword terms."
         ),
     )
     review_parser.set_defaults(func=_cmd_review)

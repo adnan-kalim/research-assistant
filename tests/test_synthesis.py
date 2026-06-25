@@ -231,6 +231,7 @@ def test_review_returns_early_no_papers(monkeypatch):
     from research_assistant.config import settings
 
     monkeypatch.setattr(settings, "anthropic_api_key", "sk-fake")
+    monkeypatch.setattr(rev_module, "_rewrite", lambda t: [t])   # skip model load
     monkeypatch.setattr(rev_module, "search_all", lambda q, limit, source_names=None: ([], []))
     monkeypatch.setattr(rev_module.store, "get_paper_texts", lambda: {})
     monkeypatch.setattr(rev_module.store, "list_saved_papers", lambda: [])
@@ -246,6 +247,7 @@ def test_review_full_map_reduce_flow(monkeypatch):
     from research_assistant.config import settings
 
     monkeypatch.setattr(settings, "anthropic_api_key", "sk-fake")
+    monkeypatch.setattr(rev_module, "_rewrite", lambda t: [t])   # skip model load
 
     live = [_make_paper("arxiv:001", "Paper Alpha"), _make_paper("arxiv:002", "Paper Beta")]
     monkeypatch.setattr(rev_module, "search_all", lambda q, limit, source_names=None: (live, []))

@@ -10,13 +10,14 @@ llama-index-vector-stores-chroma>=0.4.0
 llama-index-embeddings-huggingface>=0.4.0
 chromadb>=0.5.0
 
-# --- Local embedding backend (runs Qwen3-Embedding on your machine) ---
+# --- Local embedding + rewriting models ---
 # CPU-only torch wheel keeps the install small (~200MB instead of ~2.5GB)
 # and needs no GPU. Remove the --extra-index-url line if you have a CUDA
 # GPU and want torch to use it.
 --extra-index-url https://download.pytorch.org/whl/cpu
 sentence-transformers>=3.0.0
 torch>=2.2.0
+transformers>=4.40.0   # used directly by query_rewriter (Qwen2.5-0.5B-Instruct)
 pypdf>=4.0.0
 
 # --- Live paper sources (Phase 1) ---

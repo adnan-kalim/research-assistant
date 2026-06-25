@@ -10,13 +10,14 @@ Full reference for every service, CLI command, and configuration option in the r
 2. [Configuration service](#2-configuration-service)
 3. [Sources — live paper discovery](#3-sources--live-paper-discovery)
 4. [Domain routing](#4-domain-routing--sourcesdomainspy)
-5. [Library — personal corpus](#5-library--personal-corpus)
-6. [Q&A engine — retrieval and generation](#6-qa-engine--retrieval-and-generation)
-7. [Synthesis — literature review](#7-synthesis--literature-review)
-8. [CLI reference](#8-cli-reference)
-9. [Configuration reference](#9-configuration-reference)
-10. [Project layout](#10-project-layout)
-11. [Tech stack](#11-tech-stack)
+5. [Query rewriting](#5-query-rewriting--sourcesquery_rewriterpy)
+6. [Library — personal corpus](#6-library--personal-corpus)
+7. [Q&A engine — retrieval and generation](#7-qa-engine--retrieval-and-generation)
+8. [Synthesis — literature review](#8-synthesis--literature-review)
+9. [CLI reference](#9-cli-reference)
+10. [Configuration reference](#10-configuration-reference)
+11. [Project layout](#11-project-layout)
+12. [Tech stack](#12-tech-stack)
 
 ---
 
@@ -55,7 +56,8 @@ Question
 Dumping 20+ abstracts into one prompt produces unfocused synthesis. Instead:
 
 ```
-GATHER  Live APIs + library → deduplicated paper list
+REWRITE Topic → 2-3 keyword queries via local Qwen2.5-0.5B-Instruct
+GATHER  Live APIs (per rewritten query) + library → deduplicated paper list
 MAP     Claude summarises each paper's relevance to the topic (8 per batch, one API call per batch)
 REDUCE  Claude synthesises all summaries → structured review with per-claim citations
 ```
@@ -71,14 +73,15 @@ Loads all settings from the `.env` file and environment variables into a single 
 ```python
 from research_assistant.config import settings
 
-settings.anthropic_api_key   # str | None
-settings.reasoning_model     # "claude-haiku-4-5"
-settings.embedding_model     # "Qwen/Qwen3-Embedding-0.6B"
-settings.reranker_model      # "cross-encoder/ms-marco-MiniLM-L-6-v2"
-settings.reranker_top_n      # 6
-settings.retrieval_wide_k    # 20
-settings.chroma_dir          # Path  (data/chroma)
-settings.collection_name     # "papers"
+settings.anthropic_api_key      # str | None
+settings.reasoning_model        # "claude-haiku-4-5"
+settings.embedding_model        # "Qwen/Qwen3-Embedding-0.6B"
+settings.query_rewriter_model   # "Qwen/Qwen2.5-0.5B-Instruct"
+settings.reranker_model         # "cross-encoder/ms-marco-MiniLM-L-6-v2"
+settings.reranker_top_n         # 6
+settings.retrieval_wide_k       # 20
+settings.chroma_dir             # Path  (data/chroma)
+settings.collection_name        # "papers"
 ```
 
 `settings.redacted()` returns a dict with secrets masked — safe to print or log.
@@ -194,7 +197,39 @@ source_names, explanation = resolve_sources(
 
 ---
 
-## 5. Library — personal corpus
+## 5. Query rewriting — `sources/query_rewriter.py`
+
+Live paper APIs (arXiv, Semantic Scholar, OpenAlex) use keyword matching, not semantic search. A natural-language question like *"attention spans among teenagers in the last ten years"* causes false matches on "attention" (machine-learning attention mechanisms), "teenagers" (any adolescent study), and "ten years" (any longitudinal work). Query rewriting converts the topic into 2-3 tight academic keyword phrases before hitting the APIs.
+
+### How it works
+
+1. The topic is sent to `Qwen/Qwen2.5-0.5B-Instruct`, a ~500 MB instruction-tuned model running locally on CPU.
+2. A system prompt asks for exactly 3 short keyword queries (3-6 words each), one per line, no extra text.
+3. The output is parsed: numbering (`1.`), bullets (`-`, `•`), and quotes are stripped.
+4. Each rewritten query is sent to `search_all` independently; results are merged and deduplicated by paper id.
+5. If the model fails for any reason, the original topic is used as-is — no error surfaces to the caller.
+
+### Model and caching
+
+The model is lazy-loaded on first use and cached for the process lifetime (same pattern as the embedding model). It downloads once to `C:\Users\<you>\.cache\huggingface\hub\` and is shared with any other project on the machine. Setting `device=-1` pins it to CPU so it never competes with the embedding model for GPU memory.
+
+
+### Public API
+
+```python
+from research_assistant.sources.query_rewriter import rewrite
+
+queries = rewrite("attention spans among teenagers in the last ten years")
+# → ["adolescent sustained attention span",
+#    "teenage focus digital media screen time",
+#    "youth cognitive performance technology"]
+```
+
+`rewrite` always returns a non-empty list. On failure it returns `[topic]`.
+
+---
+
+## 6. Library — personal corpus
 
 **Directory:** `src/research_assistant/library/`
 
@@ -238,7 +273,7 @@ store.delete_paper("arxiv:2301.12345")  # remove all chunks for a paper
 
 ---
 
-## 6. Q&A engine — retrieval and generation
+## 7. Q&A engine — retrieval and generation
 
 **File:** `src/research_assistant/qa/engine.py`
 
@@ -279,7 +314,7 @@ answer.citations   # list[Citation]
 
 ---
 
-## 7. Synthesis — literature review
+## 8. Synthesis — literature review
 
 **File:** `src/research_assistant/synthesis/review.py`
 
@@ -304,7 +339,7 @@ lit.paper_count  # int
 
 | Function | Role |
 |---|---|
-| `_gather_papers(topic, live_limit, include_live, source_names)` | Searches live APIs (with domain-routed source list) and reads the saved library. Merges both lists, deduplicating by `paper_id`. Live-API version wins when a paper appears in both. |
+| `_gather_papers(topic, live_limit, include_live, source_names, use_rewriter, queries)` | If `queries` is provided (pre-computed by the CLI), uses them directly. Otherwise calls `_rewrite` when `use_rewriter=True`. Loops `search_all` over each query, deduplicates by `paper_id`, then merges the saved library. Live version wins on duplicates. |
 | `_map_batch(batch, topic, client)` | Sends up to 8 papers to Claude with a structured prompt asking for numbered summaries (`[1]`, `[2]`, ...). Parses the response with a regex and returns one summary string per paper. |
 | `_reduce(paper_summaries, topic, client)` | Sends all summaries to Claude and requests a four-section synthesis: Main Themes, Consensus, Disagreements & Open Questions, Gaps. |
 | `_make_label(authors, year)` | Formats `"Smith et al., 2023"` from raw metadata. |
@@ -327,7 +362,7 @@ Forcing numbered blocks makes parsing deterministic. If Claude omits a block, th
 
 ---
 
-## 8. CLI reference
+## 9. CLI reference
 
 All subcommands are thin wrappers in `src/research_assistant/cli.py` that delegate to the core modules above. No business logic lives in the CLI.
 
@@ -348,6 +383,7 @@ research search "X" --sources openalex                  # explicit override
 | `--limit N` | `5` | Max results per source |
 | `--domain NAME` | `auto` | Topic domain for source routing. `auto` classifies locally with the embedding model. `all` queries every source. See domain table below. |
 | `--sources LIST` | — | Comma-separated explicit sources (`arxiv`, `semantic_scholar`, `openalex`). Overrides `--domain`. |
+| `--no-rewrite` | off | Send the query verbatim to APIs, skipping local query rewriting. Useful when you've already written tight keyword phrases. |
 
 Results are numbered. Pass a number to `research save`.
 
@@ -422,20 +458,23 @@ research review "X" --sources semantic_scholar          # explicit override
 | `--no-live` | off | Only synthesise saved library; skips routing entirely |
 | `--domain NAME` | `auto` | Topic domain for source routing. `auto` classifies locally. `all` queries every source. See domain table below. |
 | `--sources LIST` | — | Comma-separated explicit sources. Overrides `--domain`. |
+| `--no-rewrite` | off | Send the topic verbatim to APIs, skipping local query rewriting. |
 
 Output: four-section synthesis (Main Themes, Consensus, Disagreements & Open Questions, Gaps) followed by a numbered source list.
 
 ---
 
-## 9. Configuration reference
+## 10. Configuration reference
 
 Set these in your `.env` file. Environment variables always override `.env` values.
 
 | Variable | Default | Description |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | *(required for Q&A and review)* | Anthropic API key |
+| `HF_TOKEN` | *(optional)* | HuggingFace access token. Suppresses the "unauthenticated" warning and gives higher download rate limits. Free at huggingface.co → Settings → Access Tokens. |
 | `REASONING_MODEL` | `claude-haiku-4-5` | Claude model for Q&A and synthesis |
 | `EMBEDDING_MODEL` | `Qwen/Qwen3-Embedding-0.6B` | Local HuggingFace embedding model. Upgrade to `Qwen/Qwen3-Embedding-4B` for better quality at ~4× the size. |
+| `QUERY_REWRITER_MODEL` | `Qwen/Qwen2.5-0.5B-Instruct` | Local generative model for query rewriting (~500 MB, CPU-only). Any HuggingFace instruction-tuned chat model works. |
 | `RERANKER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Cross-encoder reranker. `Qwen/Qwen3-Reranker-0.6B` is an alternative. |
 | `RERANKER_TOP_N` | `6` | Chunks kept after reranking, forwarded to Claude |
 | `RETRIEVAL_WIDE_K` | `20` | Candidate pool fetched before reranking (higher = better recall, slower rerank) |
@@ -446,7 +485,7 @@ Set these in your `.env` file. Environment variables always override `.env` valu
 
 ---
 
-## 10. Project layout
+## 11. Project layout
 
 ```
 research-assistant/
@@ -469,6 +508,7 @@ research-assistant/
       openalex.py               OpenAlex API
       aggregator.py             Fan-out search across all sources
       domains.py                Local embedding-based domain routing
+      query_rewriter.py         Local generative query rewriting (Qwen2.5-0.5B-Instruct)
 
     library/
       ingest.py                 chunk → embed → upsert pipeline
@@ -490,6 +530,7 @@ research-assistant/
     test_retrieval.py           Phase 4: hybrid retrieval + reranker wiring
     test_synthesis.py           Phase 5: gather, MAP, REDUCE, end-to-end flow
     test_domains.py             Domain routing: classify, resolve, priority chain
+    test_query_rewriter.py      Query rewriting: output parsing, stripping, fallback
 
   scripts/
     smoke_test.py               End-to-end happy path: search → save → ask
@@ -497,13 +538,14 @@ research-assistant/
 
 ---
 
-## 11. Tech stack
+## 12. Tech stack
 
 | Concern | Choice | Why |
 |---|---|---|
 | Language | Python 3.11+ | Standard for RAG/AI tooling |
 | RAG framework | LlamaIndex | Retrieval/ingestion-first; least glue code for this use case |
 | Embeddings | Qwen3-Embedding-0.6B | Free, local, private. The dedicated embedding variant — not the Qwen3 chat model. |
+| Query rewriter | Qwen2.5-0.5B-Instruct | ~500 MB local generative model; converts natural-language topics into tight keyword queries before hitting APIs. |
 | Reranker | ms-marco-MiniLM-L-6-v2 | ~80 MB cross-encoder; big quality win, runs fast on CPU |
 | Vector DB | Chroma | Zero-config, runs in-process, fully persistent |
 | Hybrid retrieval | BM25 + vector → RRF | Covers each other's failure modes; RRF fuses rank lists without comparing incompatible raw scores |

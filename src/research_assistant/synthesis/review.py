@@ -31,6 +31,7 @@ import anthropic
 from research_assistant.config import settings
 from research_assistant.library import store
 from research_assistant.sources.aggregator import search_all
+from research_assistant.sources.query_rewriter import rewrite as _rewrite
 
 _MAP_BATCH_SIZE = 8       # papers per MAP API call
 _MAX_TEXT_CHARS = 2_000   # truncate very long abstracts/chunks before sending
@@ -122,6 +123,8 @@ def _gather_papers(
     live_limit: int,
     include_live: bool,
     source_names: list[str] | None = None,
+    use_rewriter: bool = False,
+    queries: list[str] | None = None,
 ) -> list[_RawPaper]:
     """Collect papers from live APIs and the saved library, deduplicated.
 
@@ -130,23 +133,38 @@ def _gather_papers(
     taking precedence (it has a fresh abstract).
 
     Args:
-        source_names: Which live sources to query. None means all sources.
-                      Resolved by domains.resolve_sources() before this is called.
+        source_names:  Which live sources to query. None means all sources.
+                       Resolved by domains.resolve_sources() before this is called.
+        use_rewriter:  If True, expand the topic into 2-3 keyword queries via
+                       the local rewriter model before hitting APIs (better
+                       recall for natural-language topics).
+        queries:       Pre-computed rewritten queries. If provided, used directly
+                       and use_rewriter is ignored. Lets the CLI call _rewrite
+                       once, print the results, and pass them here.
     """
     papers: dict[str, _RawPaper] = {}
 
     if include_live:
-        live, _ = search_all(topic, limit=live_limit, source_names=source_names)
-        for p in live:
-            text = f"{p.title}\n\n{p.abstract}" if p.abstract else p.title
-            papers[p.id] = _RawPaper(
-                paper_id=p.id,
-                title=p.title,
-                authors=", ".join(p.authors),
-                year=p.year,
-                source=p.source,
-                text=text,
-            )
+        if queries is not None:
+            live_queries = queries
+        elif use_rewriter:
+            live_queries = _rewrite(topic)
+        else:
+            live_queries = [topic]
+        for q in live_queries:
+            live, _ = search_all(q, limit=live_limit, source_names=source_names)
+            for p in live:
+                if p.id in papers:
+                    continue   # first query's version wins (usually best match)
+                text = f"{p.title}\n\n{p.abstract}" if p.abstract else p.title
+                papers[p.id] = _RawPaper(
+                    paper_id=p.id,
+                    title=p.title,
+                    authors=", ".join(p.authors),
+                    year=p.year,
+                    source=p.source,
+                    text=text,
+                )
 
     library_texts = store.get_paper_texts()
     for meta in store.list_saved_papers():
@@ -225,15 +243,20 @@ def review(
     live_limit: int = 10,
     include_live: bool = True,
     source_names: list[str] | None = None,
+    use_rewriter: bool = True,
+    queries: list[str] | None = None,
 ) -> LitReview:
     """Run a map-reduce literature review on `topic`.
 
     Args:
-        topic:        The research topic to synthesise.
-        live_limit:   Papers to fetch per live API source (arXiv, S2, OpenAlex).
-        include_live: If False, only the saved library is used (no API calls).
-        source_names: Which live sources to query (resolved by the CLI via
-                      domains.resolve_sources). None means all sources.
+        topic:         The research topic to synthesise.
+        live_limit:    Papers to fetch per live API source (arXiv, S2, OpenAlex).
+        include_live:  If False, only the saved library is used (no API calls).
+        source_names:  Which live sources to query (resolved by the CLI via
+                       domains.resolve_sources). None means all sources.
+        use_rewriter:  If True (default), expand the topic into 2-3 keyword
+                       queries before hitting APIs. Pass False or --no-rewrite
+                       to skip (useful if you've already crafted tight terms).
 
     Returns a LitReview with the synthesis text and the full source list.
     """
@@ -249,6 +272,8 @@ def review(
         live_limit=live_limit,
         include_live=include_live,
         source_names=source_names,
+        use_rewriter=use_rewriter,
+        queries=queries,
     )
     if not raw_papers:
         return LitReview(
